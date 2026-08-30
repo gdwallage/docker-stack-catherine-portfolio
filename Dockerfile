@@ -1,32 +1,27 @@
 # Multi-stage build for Catherine Wallage WordPress Stack
-FROM php:8.3-fpm-alpine AS builder
+FROM wordpress:fpm-alpine AS builder
 
-RUN apk update && apk add --no-cache \
-    $PHPIZE_DEPS \
+RUN apk add --no-cache \
+    autoconf \
+    build-base \
+    linux-headers \
     freetype-dev \
     libjpeg-turbo-dev \
     libpng-dev \
     libwebp-dev \
     libavif-dev \
-    libzip-dev \
-    imagemagick \
     imagemagick-dev \
-    icu-dev \
-    oniguruma-dev \
-    libxml2-dev
+    libzip-dev \
+    git \
+    unzip
 
-# Configure and compile core PHP extensions
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp --with-avif && \
-    docker-php-ext-install -j$(nproc) \
-        gd \
-        mysqli \
-        pdo_mysql \
-        opcache \
-        exif \
-        zip \
-        intl \
-        bcmath \
-        soap
+# Configure and compile GD with modern format support
+RUN docker-php-ext-configure gd \
+    --with-freetype \
+    --with-jpeg \
+    --with-webp \
+    --with-avif \
+    && docker-php-ext-install -j$(nproc) gd
 
 # Compile PECL extensions
 RUN pecl install redis imagick && \
@@ -35,20 +30,19 @@ RUN pecl install redis imagick && \
 # ==============================================================================
 # Final Production Runtime Stage
 # ==============================================================================
-FROM php:8.3-fpm-alpine
+FROM wordpress:fpm-alpine
 
-RUN apk update && apk add --no-cache \
+RUN apk add --no-cache \
     freetype \
     libjpeg-turbo \
     libpng \
     libwebp \
     libavif \
-    libzip \
     imagemagick \
-    icu-libs \
-    shadow \
-    bash \
+    libzip \
+    libgomp \
     jpegoptim \
+    libjpeg-turbo-utils \
     optipng \
     pngquant \
     gifsicle \
@@ -59,26 +53,26 @@ RUN apk update && apk add --no-cache \
 RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && \
     chmod +x /usr/local/bin/wp
 
-# Copy compiled extensions from builder stage
+# Copy extensions from builder stage
 COPY --from=composer:latest /usr/bin/composer /usr/local/bin/composer
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
 
-# Create host-matching user and group (2000:2000)
+# Create the explicit host-matching Group and User accounts
 RUN addgroup -g 2000 media && \
     adduser -u 2000 -D -S -G media sickchill
 
-# Production PHP & OPcache tuning
+# Inject optimized PHP OPcache settings
 RUN { \
     echo 'opcache.memory_consumption=256'; \
     echo 'opcache.interned_strings_buffer=16'; \
-    echo 'opcache.max_accelerated_files=20000'; \
-    echo 'opcache.revalidate_freq=2'; \
+    echo 'opcache.max_accelerated_files=10000'; \
+    echo 'opcache.revalidate_freq=60'; \
     echo 'opcache.fast_shutdown=1'; \
     echo 'opcache.enable_cli=1'; \
-} > /usr/local/etc/php/conf.d/opcache-recommended.ini
+} > /usr/local/etc/php/conf.d/opcache-custom.ini
 
-# PHP-FPM Process Pool Tuning
+# Inject performance pool configuration aligned to UID/GID 2000
 RUN { \
     echo '[www]'; \
     echo 'user = sickchill'; \
@@ -89,8 +83,9 @@ RUN { \
     echo 'pm.min_spare_servers = 4'; \
     echo 'pm.max_spare_servers = 12'; \
     echo 'pm.max_requests = 1000'; \
-} > /usr/local/etc/php-fpm.d/zz-docker.conf
+} > /usr/local/etc/php-fpm.d/zz-docker-performance.conf
 
 WORKDIR /var/www/html
-EXPOSE 9000
-CMD ["php-fpm"]
+RUN chown -R sickchill:media /var/www/html
+
+USER sickchill
