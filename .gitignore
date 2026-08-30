@@ -1,0 +1,6 @@
+html/
+certs/
+*.sql
+*.tar.gz
+.DS_Store
+*.log
